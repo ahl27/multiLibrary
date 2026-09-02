@@ -1,26 +1,37 @@
 #' Mock Package Data Structure
 #'
-#' Defines a mock package structure for test dependency trees.
+#' Defines a mock package structure for test dependency trees, with optional
+#' custom R code, exports, and namespace directives.
 #'
 #' @param name Character string; package name (must be >= 2 characters).
 #' @param version Character string; package version (e.g. "1.0.0").
 #' @param depends Character vector or list of mock_package objects.
 #' @param imports Character vector or list of mock_package objects.
 #' @param suggests Character vector or list of mock_package objects.
+#' @param code Optional character vector of R code for R/code.R.
+#' @param exports Optional character vector of function names to export.
+#' @param namespace_extra Optional character vector of extra NAMESPACE lines
+#'   (e.g., S3method directives, importFrom directives).
 #'
 #' @return A list of class "mock_package".
 mock_package <- function(name,
                          version = "1.0.0",
                          depends = character(0L),
                          imports = character(0L),
-                         suggests = character(0L)) {
+                         suggests = character(0L),
+                         code = NULL,
+                         exports = NULL,
+                         namespace_extra = character(0L)) {
   structure(
     list(
       name = name,
       version = version,
       depends = depends,
       imports = imports,
-      suggests = suggests
+      suggests = suggests,
+      code = code,
+      exports = exports,
+      namespace_extra = namespace_extra
     ),
     class = "mock_package"
   )
@@ -140,7 +151,10 @@ create_mock_library <- function(..., lib_dir = NULL) {
       desc_lines <- c(desc_lines, paste0("Suggests: ", sug_str))
     }
 
-    ns_lines <- paste0("export(", pkg$name, "_fn)")
+    # Build NAMESPACE directives
+    export_items <- pkg$exports %||% paste0(pkg$name, "_fn")
+    ns_lines <- paste0("export(", export_items, ")")
+
     if (!is.null(imp_str) && nzchar(trimws(imp_str))) {
       imp_names <- setdiff(
         vapply(
@@ -155,12 +169,20 @@ create_mock_library <- function(..., lib_dir = NULL) {
       }
     }
 
+    if (length(pkg$namespace_extra) > 0L) {
+      ns_lines <- c(ns_lines, pkg$namespace_extra)
+    }
+
+    # Code lines
+    code_lines <- pkg$code %||% sprintf(
+      "%s_fn <- function() '%s'",
+      pkg$name,
+      pkg$name
+    )
+
     writeLines(desc_lines, file.path(p_src, "DESCRIPTION"))
     writeLines(ns_lines, file.path(p_src, "NAMESPACE"))
-    writeLines(
-      sprintf("%s_fn <- function() '%s'", pkg$name, pkg$name),
-      file.path(p_src, "R", "code.R")
-    )
+    writeLines(code_lines, file.path(p_src, "R", "code.R"))
 
     # Install into lib_dir with R_LIBS pointing to lib_dir
     install_args <- c(
@@ -266,4 +288,48 @@ compare_to_base_r <- function(target_pkgs, mock_lib) {
   loaded_match <- identical(loaded_std_mock, loaded_multi_mock)
 
   search_match && loaded_match
+}
+
+#' Compare Function Execution Output between Base R and multiLibrary()
+#'
+#' Evaluates an arbitrary R expression string after loading packages via
+#' standard library() vs multiLibrary(), verifying that runtime function calls,
+#' S3/S4 method dispatches, and package hooks produce identical results.
+#'
+#' @param target_pkgs Character vector of target package names.
+#' @param expr_str Character string containing the R expression to evaluate.
+#' @param mock_lib A mock_library object returned by create_mock_library().
+#'
+#' @return Logical TRUE if evaluation outputs are identical.
+compare_execution <- function(target_pkgs, expr_str, mock_lib) {
+  r_bin <- file.path(R.home("bin"), "Rscript")
+
+  # Standard sequential library calls
+  lib_calls <- paste(
+    sprintf("library(%s);", target_pkgs),
+    collapse = " "
+  )
+  cmd_std <- sprintf(
+    ".libPaths(c(%s, .libPaths())); %s cat(as.character(%s))",
+    shQuote(mock_lib$lib_dir),
+    lib_calls,
+    expr_str
+  )
+  out_std <- system2(r_bin, c("-e", shQuote(cmd_std)), stdout = TRUE)
+
+  # multiLibrary call
+  multi_args <- paste(sprintf('"%s"', target_pkgs), collapse = ", ")
+  cmd_multi <- sprintf(
+    paste0(
+      ".libPaths(c(%s, .libPaths())); library(multiLibrary); ",
+      "multiLibrary(%s, quietly = TRUE); ",
+      "cat(as.character(%s))"
+    ),
+    shQuote(mock_lib$lib_dir),
+    multi_args,
+    expr_str
+  )
+  out_multi <- system2(r_bin, c("-e", shQuote(cmd_multi)), stdout = TRUE)
+
+  identical(out_std, out_multi)
 }

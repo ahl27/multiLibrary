@@ -609,4 +609,140 @@ local({
   )
 })
 
+# ==============================================================================
+# 14. S3 Generics, Method Dispatch, & Imports Execution Behavior
+# ==============================================================================
+#
+# 14.1 Custom S3 Generic in Imported Package, Method in Second Imported Package
+#
+#   [pkgApp] (Target)
+#     │         │
+#  (Imports)  (Imports)
+#     │         │
+#     ▼         ▼
+#  pkgMethod   pkgGeneric (Defines generic greet())
+#    (Registers S3method(greet, custom_type))
+#
+local({
+  pkgGeneric <- mock_package(
+    "pkgGeneric",
+    code = "greet <- function(x, ...) UseMethod('greet')",
+    exports = "greet"
+  )
+
+  pkgMethod <- mock_package(
+    "pkgMethod",
+    imports = list(pkgGeneric),
+    code = c(
+      "make_custom <- function() structure(list(), class = 'custom_type')",
+      "greet.custom_type <- function(x, ...) 'Dispatched greet.custom_type!'"
+    ),
+    exports = "make_custom",
+    namespace_extra = "S3method(greet, custom_type)"
+  )
+
+  pkgApp <- mock_package(
+    "pkgApp",
+    imports = list(pkgMethod, pkgGeneric),
+    code = "run_app <- function() greet(make_custom())",
+    exports = "run_app"
+  )
+
+  lib <- create_mock_library(pkgApp, pkgMethod, pkgGeneric)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Custom S3 method dispatch across imports must match Base R" =
+      compare_execution("pkgApp", "run_app()", lib),
+    "pkgApp session state must match Base R" =
+      compare_to_base_r("pkgApp", lib)
+  )
+})
+
+# 14.2 Base R Generic Overload & .onLoad Hook in Imported Package
+#
+#   [pkgConsumer] (Target)
+#         │
+#     (Imports)
+#         │
+#         ▼
+#   pkgBaseOverload (Registers S3method(as.character, boxed_val) & .onLoad)
+#
+local({
+  pkgBaseOverload <- mock_package(
+    "pkgBaseOverload",
+    code = c(
+      ".onLoad <- function(libname, pkgname) {",
+      "  options(pkgBaseOverload_loaded = TRUE)",
+      "}",
+      "box_val <- function(v) structure(list(val = v), class = 'boxed_val')",
+      "as.character.boxed_val <- function(x, ...) paste0('[', x$val, ']')"
+    ),
+    exports = "box_val",
+    namespace_extra = "S3method(as.character, boxed_val)"
+  )
+
+  pkgConsumer <- mock_package(
+    "pkgConsumer",
+    imports = list(pkgBaseOverload),
+    code = c(
+      "get_boxed <- function() as.character(box_val(99))",
+      "get_hook_state <- function() {",
+      "  isTRUE(getOption('pkgBaseOverload_loaded'))",
+      "}"
+    ),
+    exports = c("get_boxed", "get_hook_state")
+  )
+
+  lib <- create_mock_library(pkgConsumer, pkgBaseOverload)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Base R generic dispatch in imported package must match Base R" =
+      compare_execution("pkgConsumer", "get_boxed()", lib),
+    ".onLoad hook execution in imported package must match Base R" =
+      compare_execution("pkgConsumer", "get_hook_state()", lib),
+    "pkgConsumer session state must match Base R" =
+      compare_to_base_r("pkgConsumer", lib)
+  )
+})
+
+# 14.3 Selective Function Import via importFrom
+#
+#   [pkgClient] (Target)
+#         │
+#   (importFrom(pkgLib, calc_add))
+#         │
+#         ▼
+#       pkgLib (Exports calc_add, calc_sub)
+#
+local({
+  pkgLib <- mock_package(
+    "pkgLib",
+    code = c(
+      "calc_add <- function(a, b) a + b",
+      "calc_sub <- function(a, b) a - b"
+    ),
+    exports = c("calc_add", "calc_sub")
+  )
+
+  pkgClient <- mock_package(
+    "pkgClient",
+    imports = list(pkgLib),
+    code = "run_calc <- function() calc_add(10, 25)",
+    exports = "run_calc",
+    namespace_extra = "importFrom(pkgLib, calc_add)"
+  )
+
+  lib <- create_mock_library(pkgClient, pkgLib)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Selective importFrom call execution must match Base R" =
+      compare_execution("pkgClient", "run_calc()", lib),
+    "pkgClient session state must match Base R" =
+      compare_to_base_r("pkgClient", lib)
+  )
+})
+
 cat("All consolidated multiLibrary tests passed successfully!\n")
