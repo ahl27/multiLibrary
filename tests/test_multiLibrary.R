@@ -468,6 +468,69 @@ local({
   )
 })
 
+# 5.7 Unsatisfiable Multi-Version Constraints Across Library Paths
+#
+#   Installed candidate versions:
+#     lib1: pkgDep v3.0.0 (Imports depV3)
+#     lib3: pkgDep v1.0.0 (Imports depV1)
+#     (v2.0.0 is NOT installed anywhere)
+#
+#   Constraints:
+#     pkgA depends on pkgDep (>= 1.5.0)
+#     pkgB depends on pkgDep (<= 2.5.0)
+#
+#   Because neither v3.0.0 nor v1.0.0 satisfies [>= 1.5.0, <= 2.5.0],
+#   resolution must fail with a version conflict error.
+#
+local({
+  lib1 <- tempfile("lib1_")
+  lib3 <- tempfile("lib3_")
+
+  depV1 <- mock_package("depV1")
+  depV3 <- mock_package("depV3")
+
+  pkgDep_v3 <- mock_package("pkgDep", version = "3.0.0", imports = list(depV3))
+  pkgDep_v1 <- mock_package("pkgDep", version = "1.0.0", imports = list(depV1))
+
+  m1 <- create_mock_library(pkgDep_v3, depV3, lib_dir = lib1)
+  m3 <- create_mock_library(pkgDep_v1, depV1, lib_dir = lib3)
+
+  pkgA <- mock_package("pkgA", depends = list("pkgDep (>= 1.5.0)"))
+  pkgB <- mock_package("pkgB", depends = list("pkgDep (<= 2.5.0)"))
+  libApp <- tempfile("libApp_")
+  mApp <- create_mock_library(pkgA, pkgB, lib_dir = libApp)
+
+  on.exit({
+    m1$cleanup()
+    m3$cleanup()
+    mApp$cleanup()
+  }, add = TRUE)
+
+  all_libs <- c(mApp$lib_dir, m1$lib_dir, m3$lib_dir)
+
+  err_ab <- tryCatch(
+    resolve_dependencies(c("pkgA", "pkgB"), lib.loc = all_libs),
+    error = function(e) e
+  )
+  stopifnot(
+    "Unsatisfiable multi-version forward order must fail" =
+      inherits(err_ab, "error"),
+    "Unsatisfiable multi-version error must report version conflict" =
+      grepl("Version conflict", err_ab$message)
+  )
+
+  err_ba <- tryCatch(
+    resolve_dependencies(c("pkgB", "pkgA"), lib.loc = all_libs),
+    error = function(e) e
+  )
+  stopifnot(
+    "Unsatisfiable multi-version reverse order must fail" =
+      inherits(err_ba, "error"),
+    "Unsatisfiable multi-version reverse error must report version conflict" =
+      grepl("Version conflict", err_ba$message)
+  )
+})
+
 # ==============================================================================
 # 6. Cyclic Dependency Handling
 # ==============================================================================
