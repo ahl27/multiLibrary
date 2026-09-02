@@ -140,11 +140,23 @@ create_mock_library <- function(..., lib_dir = NULL) {
       desc_lines <- c(desc_lines, paste0("Suggests: ", sug_str))
     }
 
+    ns_lines <- paste0("export(", pkg$name, "_fn)")
+    if (!is.null(imp_str) && nzchar(trimws(imp_str))) {
+      imp_names <- setdiff(
+        vapply(
+          tools:::.split_dependencies(imp_str),
+          function(x) x$name,
+          character(1L)
+        ),
+        "R"
+      )
+      if (length(imp_names) > 0L) {
+        ns_lines <- c(ns_lines, paste0("import(", imp_names, ")"))
+      }
+    }
+
     writeLines(desc_lines, file.path(p_src, "DESCRIPTION"))
-    writeLines(
-      paste0("export(", pkg$name, "_fn)"),
-      file.path(p_src, "NAMESPACE")
-    )
+    writeLines(ns_lines, file.path(p_src, "NAMESPACE"))
     writeLines(
       sprintf("%s_fn <- function() '%s'", pkg$name, pkg$name),
       file.path(p_src, "R", "code.R")
@@ -172,10 +184,7 @@ create_mock_library <- function(..., lib_dir = NULL) {
     if (!dir.exists(p_dest)) {
       dir.create(p_dest, recursive = TRUE)
       writeLines(desc_lines, file.path(p_dest, "DESCRIPTION"))
-      writeLines(
-        paste0("export(", pkg$name, "_fn)"),
-        file.path(p_dest, "NAMESPACE")
-      )
+      writeLines(ns_lines, file.path(p_dest, "NAMESPACE"))
     }
   }
 
@@ -196,16 +205,17 @@ create_mock_library <- function(..., lib_dir = NULL) {
   )
 }
 
-#' Compare Search Paths between library() and multiLibrary()
+#' Compare Session State between Base R library() and multiLibrary()
 #'
-#' Spawns isolated clean R sessions to verify whether standard library()
-#' sequential loading produces an identical search() path to multiLibrary().
+#' Spawns isolated clean R sessions to verify whether standard Base R library()
+#' sequential loading produces an identical search() path AND identical
+#' loadedNamespaces() state to multiLibrary().
 #'
 #' @param target_pkgs Character vector of target package names.
 #' @param mock_lib A mock_library object returned by create_mock_library().
 #'
-#' @return Logical TRUE if search paths are identical.
-compare_search_paths <- function(target_pkgs, mock_lib) {
+#' @return Logical TRUE if search paths and loaded namespaces are identical.
+compare_to_base_r <- function(target_pkgs, mock_lib) {
   r_bin <- file.path(R.home("bin"), "Rscript")
 
   # Standard sequential library calls
@@ -214,12 +224,18 @@ compare_search_paths <- function(target_pkgs, mock_lib) {
     collapse = " "
   )
   cmd_std_expr <- sprintf(
-    ".libPaths(c(%s, .libPaths())); %s cat(paste(search(), collapse = ':::'))",
+    paste0(
+      ".libPaths(c(%s, .libPaths())); %s ",
+      "cat(paste(search(), collapse = ':::'), '---SPLIT---', ",
+      "paste(loadedNamespaces(), collapse = ':::'), sep = '')"
+    ),
     shQuote(mock_lib$lib_dir),
     lib_calls
   )
   out_std <- system2(r_bin, c("-e", shQuote(cmd_std_expr)), stdout = TRUE)
-  search_std <- strsplit(out_std[length(out_std)], ":::")[[1L]]
+  parts_std <- strsplit(out_std[length(out_std)], "---SPLIT---")[[1L]]
+  search_std <- strsplit(parts_std[1L], ":::")[[1L]]
+  loaded_std <- strsplit(parts_std[2L], ":::")[[1L]]
 
   # multiLibrary call
   multi_args <- paste(sprintf('"%s"', target_pkgs), collapse = ", ")
@@ -227,16 +243,27 @@ compare_search_paths <- function(target_pkgs, mock_lib) {
     paste0(
       ".libPaths(c(%s, .libPaths())); library(multiLibrary); ",
       "multiLibrary(%s, quietly = TRUE); ",
-      "cat(paste(search(), collapse = ':::'))"
+      "cat(paste(search(), collapse = ':::'), '---SPLIT---', ",
+      "paste(loadedNamespaces(), collapse = ':::'), sep = '')"
     ),
     shQuote(mock_lib$lib_dir),
     multi_args
   )
   out_multi <- system2(r_bin, c("-e", shQuote(cmd_multi_expr)), stdout = TRUE)
-  search_multi <- strsplit(out_multi[length(out_multi)], ":::")[[1L]]
+  parts_multi <- strsplit(out_multi[length(out_multi)], "---SPLIT---")[[1L]]
+  search_multi <- strsplit(parts_multi[1L], ":::")[[1L]]
+  loaded_multi <- strsplit(parts_multi[2L], ":::")[[1L]]
 
   # Remove multiLibrary itself from the search path comparison
   search_multi_clean <- setdiff(search_multi, "package:multiLibrary")
 
-  identical(search_std, search_multi_clean)
+  # Filter loaded namespaces to only the mock packages under test
+  mock_pkgs <- names(mock_lib$packages)
+  loaded_std_mock <- sort(intersect(loaded_std, mock_pkgs))
+  loaded_multi_mock <- sort(intersect(loaded_multi, mock_pkgs))
+
+  search_match <- identical(search_std, search_multi_clean)
+  loaded_match <- identical(loaded_std_mock, loaded_multi_mock)
+
+  search_match && loaded_match
 }

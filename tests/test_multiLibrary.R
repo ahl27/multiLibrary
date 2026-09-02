@@ -85,7 +85,7 @@ local({
 
   stopifnot(
     "Scenario 1: Multi-tier search path must match standard R" =
-      compare_search_paths("pkgA", lib)
+      compare_to_base_r("pkgA", lib)
   )
 })
 
@@ -112,13 +112,13 @@ local({
   # Forward user target order (pkgX then pkgW)
   stopifnot(
     "Scenario 2: Forward target order search path must match standard R" =
-      compare_search_paths(c("pkgX", "pkgW"), lib)
+      compare_to_base_r(c("pkgX", "pkgW"), lib)
   )
 
   # Reverse user target order (pkgW then pkgX)
   stopifnot(
     "Scenario 2: Reverse target order search path must match standard R" =
-      compare_search_paths(c("pkgW", "pkgX"), lib)
+      compare_to_base_r(c("pkgW", "pkgX"), lib)
   )
 })
 
@@ -150,13 +150,13 @@ local({
   # Case A: multiLibrary(pkgImp, pkgDep)
   stopifnot(
     "Scenario 4A: (pkgImp, pkgDep) search path must match standard R" =
-      compare_search_paths(c("pkgImp", "pkgDep"), lib)
+      compare_to_base_r(c("pkgImp", "pkgDep"), lib)
   )
 
   # Case B: multiLibrary(pkgDep, pkgImp)
   stopifnot(
     "Scenario 4B: (pkgDep, pkgImp) search path must match standard R" =
-      compare_search_paths(c("pkgDep", "pkgImp"), lib)
+      compare_to_base_r(c("pkgDep", "pkgImp"), lib)
   )
 })
 
@@ -534,7 +534,7 @@ local({
     "pkgChild must retain primary type Target despite being a dependency" =
       res$pkgChild$type == "Target",
     "Search path must match standard R" =
-      compare_search_paths(c("pkgParent", "pkgChild"), lib)
+      compare_to_base_r(c("pkgParent", "pkgChild"), lib)
   )
 })
 
@@ -599,13 +599,13 @@ local({
     "pkgA must have primary type Target" =
       res_ba$pkgA$type == "Target",
     "Order (pkgB, pkgA) search path must match standard R" =
-      compare_search_paths(c("pkgB", "pkgA"), lib)
+      compare_to_base_r(c("pkgB", "pkgA"), lib)
   )
 
   # Reverse user target order (pkgA then pkgB)
   stopifnot(
     "Order (pkgA, pkgB) search path must match standard R" =
-      compare_search_paths(c("pkgA", "pkgB"), lib)
+      compare_to_base_r(c("pkgA", "pkgB"), lib)
   )
 })
 
