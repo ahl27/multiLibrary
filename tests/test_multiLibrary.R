@@ -356,6 +356,118 @@ local({
   )
 })
 
+# 5.6 Multi-Version Candidate Selection with Distinct Dependencies
+#
+#   Installed candidate versions in library search paths:
+#     lib1: pkgDep v3.0.0  ─── Imports ───> [depV3]
+#     lib2: pkgDep v2.0.0  ─── Imports ───> [depV2]
+#     lib3: pkgDep v1.0.0  ─── Imports ───> [depV1]
+#
+#   Constraints:
+#     pkgA depends on pkgDep (>= 1.5.0)
+#     pkgB depends on pkgDep (<= 2.5.0)
+#
+#   Resolver must select pkgDep v2.0.0 from lib2 and include ONLY depV2,
+#   cleanly omitting depV1 and depV3.
+#
+local({
+  lib1 <- tempfile("lib1_")
+  lib2 <- tempfile("lib2_")
+  lib3 <- tempfile("lib3_")
+
+  depV1 <- mock_package("depV1")
+  depV2 <- mock_package("depV2")
+  depV3 <- mock_package("depV3")
+
+  pkgDep_v3 <- mock_package("pkgDep", version = "3.0.0", imports = list(depV3))
+  pkgDep_v2 <- mock_package("pkgDep", version = "2.0.0", imports = list(depV2))
+  pkgDep_v1 <- mock_package("pkgDep", version = "1.0.0", imports = list(depV1))
+
+  m1 <- create_mock_library(pkgDep_v3, depV3, lib_dir = lib1)
+  m2 <- create_mock_library(pkgDep_v2, depV2, lib_dir = lib2)
+  m3 <- create_mock_library(pkgDep_v1, depV1, lib_dir = lib3)
+
+  pkgA <- mock_package("pkgA", depends = list("pkgDep (>= 1.5.0)"))
+  pkgB <- mock_package("pkgB", depends = list("pkgDep (<= 2.5.0)"))
+  libApp <- tempfile("libApp_")
+  mApp <- create_mock_library(pkgA, pkgB, lib_dir = libApp)
+
+  on.exit({
+    m1$cleanup()
+    m2$cleanup()
+    m3$cleanup()
+    mApp$cleanup()
+  }, add = TRUE)
+
+  all_libs <- c(mApp$lib_dir, m1$lib_dir, m2$lib_dir, m3$lib_dir)
+
+  # Case 1: Forward order (>= 1.5.0 discovered before <= 2.5.0)
+  res_ab <- resolve_dependencies(c("pkgA", "pkgB"), lib.loc = all_libs)
+  stopifnot(
+    "Multi-version AB: pkgDep must resolve to v2.0.0" =
+      res_ab$pkgDep$version_installed == "2.0.0",
+    "Multi-version AB: pkgDep path must point to lib2" =
+      res_ab$pkgDep$path == file.path(m2$lib_dir, "pkgDep"),
+    "Multi-version AB: depV2 (from v2.0.0) must be included" =
+      "depV2" %in% names(res_ab),
+    "Multi-version AB: depV1 (from v1.0.0) must NOT be included" =
+      !"depV1" %in% names(res_ab),
+    "Multi-version AB: depV3 (from v3.0.0) must NOT be included" =
+      !"depV3" %in% names(res_ab),
+    "Multi-version AB: exact resolved package order" =
+      identical(names(res_ab), c("depV2", "pkgDep", "pkgA", "pkgB"))
+  )
+
+  # Case 2: Reverse order (<= 2.5.0 discovered before >= 1.5.0)
+  res_ba <- resolve_dependencies(c("pkgB", "pkgA"), lib.loc = all_libs)
+  stopifnot(
+    "Multi-version BA: pkgDep must resolve to v2.0.0" =
+      res_ba$pkgDep$version_installed == "2.0.0",
+    "Multi-version BA: pkgDep path must point to lib2" =
+      res_ba$pkgDep$path == file.path(m2$lib_dir, "pkgDep"),
+    "Multi-version BA: depV2 (from v2.0.0) must be included" =
+      "depV2" %in% names(res_ba),
+    "Multi-version BA: depV1 (from v1.0.0) must NOT be included" =
+      !"depV1" %in% names(res_ba),
+    "Multi-version BA: depV3 (from v3.0.0) must NOT be included" =
+      !"depV3" %in% names(res_ba),
+    "Multi-version BA: exact resolved package order" =
+      identical(names(res_ba), c("depV2", "pkgDep", "pkgB", "pkgA"))
+  )
+
+  # Case 3: Nested Diamond Branching
+  # (Branch 1 -> pkgDep >= 1.5.0, Branch 2 -> pkgDep <= 2.5.0)
+  pkgBr1 <- mock_package("pkgBr1", depends = list("pkgDep (>= 1.5.0)"))
+  pkgBr2 <- mock_package("pkgBr2", depends = list("pkgDep (<= 2.5.0)"))
+  pkgRoot <- mock_package("pkgRoot", depends = list("pkgBr1", "pkgBr2"))
+  libNested <- tempfile("libNested_")
+  mNested <- create_mock_library(
+    pkgRoot,
+    pkgBr1,
+    pkgBr2,
+    lib_dir = libNested
+  )
+  on.exit(mNested$cleanup(), add = TRUE)
+
+  all_libs_nested <- c(mNested$lib_dir, m1$lib_dir, m2$lib_dir, m3$lib_dir)
+  res_nested <- resolve_dependencies("pkgRoot", lib.loc = all_libs_nested)
+  stopifnot(
+    "Multi-version Nested: pkgDep must resolve to v2.0.0" =
+      res_nested$pkgDep$version_installed == "2.0.0",
+    "Multi-version Nested: depV2 must be included" =
+      "depV2" %in% names(res_nested),
+    "Multi-version Nested: depV1 must NOT be included" =
+      !"depV1" %in% names(res_nested),
+    "Multi-version Nested: depV3 must NOT be included" =
+      !"depV3" %in% names(res_nested),
+    "Multi-version Nested: exact resolved package order" =
+      identical(
+        names(res_nested),
+        c("depV2", "pkgDep", "pkgBr1", "pkgBr2", "pkgRoot")
+      )
+  )
+})
+
 # ==============================================================================
 # 6. Cyclic Dependency Handling
 # ==============================================================================

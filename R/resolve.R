@@ -1,25 +1,79 @@
 #' @keywords internal
-.find_and_read_desc <- function(pkg, lib.loc, cache = NULL) {
-  if (!is.null(cache) && exists(pkg, envir = cache, inherits = FALSE)) {
+.find_candidates <- function(pkg, lib.loc) {
+  search_paths <- lib.loc %||% .libPaths()
+  candidates <- list()
+  seen_paths <- character(0L)
+
+  # Scan each library directory using find.package(quiet = TRUE)
+  for (lp in search_paths) {
+    pkg_path <- find.package(pkg, lib.loc = lp, quiet = TRUE, verbose = FALSE)
+    if (length(pkg_path) > 0L) {
+      norm_path <- normalizePath(pkg_path, mustWork = FALSE)
+      if (norm_path %in% seen_paths) {
+        next
+      }
+      seen_paths <- c(seen_paths, norm_path)
+
+      desc <- utils::packageDescription(pkg, lib.loc = dirname(norm_path))
+      if (!inherits(desc, "packageDescription") || is.na(desc$Package)) {
+        stop(sprintf(
+          "Corrupted or unreadable DESCRIPTION for package '%s' at '%s'",
+          pkg,
+          norm_path
+        ))
+      }
+
+      candidates[[length(candidates) + 1L]] <- list(
+        desc = desc,
+        version = numeric_version(desc$Version),
+        path = norm_path,
+        lib = dirname(norm_path)
+      )
+    }
+  }
+
+  # If not found anywhere, let find.package generate the standard error
+  if (length(candidates) == 0L) {
+    find.package(pkg, lib.loc = lib.loc, verbose = FALSE)
+  }
+
+  candidates
+}
+
+
+#' @keywords internal
+.find_and_read_desc <- function(pkg,
+                                lib.loc,
+                                cache = NULL,
+                                constraints = NULL) {
+  # Return cached result if no constraints filtering is needed
+  if (is.null(constraints) && !is.null(cache) &&
+      exists(pkg, envir = cache, inherits = FALSE)) {
     return(get(pkg, envir = cache, inherits = FALSE))
   }
 
-  # Find installed package directory (errors if not installed)
-  pkg_path <- find.package(pkg, lib.loc = lib.loc, verbose = FALSE)
+  # Find all candidate installations across library search paths
+  candidates <- .find_candidates(pkg, lib.loc)
 
-  desc <- utils::packageDescription(pkg, lib.loc = dirname(pkg_path))
-  if (!inherits(desc, "packageDescription") || is.na(desc$Package)) {
-    stop(sprintf("Corrupted or unreadable DESCRIPTION for package '%s'", pkg))
+  # Filter candidates that satisfy all accumulated version constraints
+  if (!is.null(constraints) && length(constraints) > 0L) {
+    valid_cands <- Filter(function(cand) {
+      all(vapply(constraints, function(con) {
+        do.call(con$op, list(cand$version, con$version))
+      }, logical(1L)))
+    }, candidates)
+
+    if (length(valid_cands) > 0L) {
+      info <- valid_cands[[1L]]
+      if (!is.null(cache)) {
+        assign(pkg, info, envir = cache)
+      }
+      return(info)
+    }
   }
 
-  info <- list(
-    desc = desc,
-    version = numeric_version(desc$Version),
-    path = normalizePath(pkg_path, mustWork = FALSE),
-    lib = dirname(pkg_path)
-  )
-
-  # Cache this result so we don't need to lookup again in the future
+  # Fall back to first candidate in search path priority
+  info <- candidates[[1L]]
   if (!is.null(cache)) {
     assign(pkg, info, envir = cache)
   }
@@ -35,8 +89,9 @@
                                       types_map,
                                       required_by_map,
                                       deps_graph,
+                                      reach_graph,
                                       constraints_map,
-                                      visited,
+                                      selected_info,
                                       in_queue,
                                       add_to_graph = TRUE) {
   if (is.null(raw_deps) || !nzchar(trimws(raw_deps))) {
@@ -48,7 +103,6 @@
 
   for (dep_entry in parsed) {
     dep_name <- dep_entry$name
-    # The `Depends` field can contain the R version requirement itself
     if (dep_name == "R") {
       next
     }
@@ -58,23 +112,40 @@
       c(required_by_map[[dep_name]], parent_pkg)
     )
 
+    reach_graph[[parent_pkg]] <- unique(
+      c(reach_graph[[parent_pkg]], dep_name)
+    )
     if (add_to_graph) {
-      deps_graph[[parent_pkg]] <- unique(c(deps_graph[[parent_pkg]], dep_name))
-    }
-
-    if (!is.null(dep_entry$version)) {
-      op_str <- dep_entry$op %||% ">="
-      constraints_map[[dep_name]] <- c(
-        constraints_map[[dep_name]],
-        list(list(
-          op = op_str,
-          version = numeric_version(dep_entry$version),
-          by = parent_pkg
-        ))
+      deps_graph[[parent_pkg]] <- unique(
+        c(deps_graph[[parent_pkg]], dep_name)
       )
     }
 
-    if (is.null(visited[[dep_name]]) && is.null(in_queue[[dep_name]])) {
+    # Record version constraint
+    if (!is.null(dep_entry$version)) {
+      op_str <- dep_entry$op %||% ">="
+      con_entry <- list(
+        op = op_str,
+        version = numeric_version(dep_entry$version),
+        by = parent_pkg
+      )
+      constraints_map[[dep_name]] <- c(
+        constraints_map[[dep_name]],
+        list(con_entry)
+      )
+
+      # Re-enqueue dep_name if already resolved and invalid under new constraint
+      if (!is.null(selected_info[[dep_name]]) &&
+          !do.call(op_str, list(selected_info[[dep_name]]$version,
+                                con_entry$version)) &&
+          is.null(in_queue[[dep_name]])) {
+        new_pkgs <- c(new_pkgs, dep_name)
+        in_queue[[dep_name]] <- TRUE
+      }
+    }
+
+    # Enqueue dep_name if not yet resolved or queued
+    if (is.null(selected_info[[dep_name]]) && is.null(in_queue[[dep_name]])) {
       new_pkgs <- c(new_pkgs, dep_name)
       in_queue[[dep_name]] <- TRUE
     }
@@ -132,7 +203,7 @@
 #' Inspects package DESCRIPTION metadata using \code{packageDescription} without
 #' loading namespaces or modifying the search path. Computes the maximum
 #' required version for each package across all dependency trees, checks
-#" installed versions, and determines the path and load order.
+#' installed versions, and determines the path and load order.
 #'
 #' @param packages Character vector of package names to resolve.
 #' @param lib.loc Character vector of library paths. Defaults to
@@ -166,40 +237,47 @@ resolve_dependencies <- function(packages,
     stop("'packages' must be a non-empty character vector")
   }
 
-  visited <- new.env(hash = TRUE, parent = emptyenv())
-  in_queue <- new.env(hash = TRUE, parent = emptyenv())
-
-  queue <- unique(packages)
-  for (p in queue) {
-    in_queue[[p]] <- TRUE
-  }
-
-  # Dependency tracking (environments for by-reference updates and O(1) lookups)
+  constraints_map <- new.env(hash = TRUE, parent = emptyenv())
+  selected_info <- new.env(hash = TRUE, parent = emptyenv())
+  types_map <- new.env(hash = TRUE, parent = emptyenv())
   required_by_map <- new.env(hash = TRUE, parent = emptyenv())
   deps_graph <- new.env(hash = TRUE, parent = emptyenv())
-  constraints_map <- new.env(hash = TRUE, parent = emptyenv())
-  types_map <- new.env(hash = TRUE, parent = emptyenv())
+  reach_graph <- new.env(hash = TRUE, parent = emptyenv())
 
   for (p in packages) {
     types_map[[p]] <- "Target"
   }
 
-  desc_cache <- new.env(parent = emptyenv())
+  queue <- unique(packages)
+  in_queue <- new.env(hash = TRUE, parent = emptyenv())
+  for (p in queue) {
+    in_queue[[p]] <- TRUE
+  }
 
-  # Traverse dependency tree
+  visited_order <- character(0L)
+
+  # Traverse dependency tree using targeted worklist queue
   while (length(queue) > 0L) {
     curr <- queue[1L]
     queue <- queue[-1L]
     in_queue[[curr]] <- NULL
 
-    if (!is.null(visited[[curr]])) {
-      next
+    if (!curr %in% visited_order) {
+      visited_order <- c(visited_order, curr)
     }
-    visited[[curr]] <- TRUE
 
-    pkg_info <- .find_and_read_desc(curr, lib.loc = lib.loc, cache = desc_cache)
+    # Select candidate satisfying all currently known constraints for curr
+    c_list <- constraints_map[[curr]]
+    pkg_info <- .find_and_read_desc(
+      curr,
+      lib.loc = lib.loc,
+      constraints = c_list
+    )
+    selected_info[[curr]] <- pkg_info
+
     desc <- pkg_info$desc
     deps_graph[[curr]] <- character(0L)
+    reach_graph[[curr]] <- character(0L)
 
     process_field <- function(raw_deps, type_label, add_to_graph = TRUE) {
       .process_dependency_field(
@@ -209,32 +287,55 @@ resolve_dependencies <- function(packages,
         types_map = types_map,
         required_by_map = required_by_map,
         deps_graph = deps_graph,
+        reach_graph = reach_graph,
         constraints_map = constraints_map,
-        visited = visited,
+        selected_info = selected_info,
         in_queue = in_queue,
         add_to_graph = add_to_graph
       )
     }
 
     ## Add new Depends, Imports, and (optionally) Suggests to queue
-    queue <- c(queue, process_field(desc$Depends, "Depends"))
-    queue <- c(queue, process_field(desc$Imports, "Imports"))
+    new_dep_pkgs <- process_field(desc$Depends, "Depends")
+    new_imp_pkgs <- process_field(desc$Imports, "Imports")
+    queue <- c(queue, new_dep_pkgs, new_imp_pkgs)
+
     if (include_suggests) {
-      queue <- c(
-        queue,
-        process_field(desc$Suggests, "Suggests", add_to_graph = FALSE)
+      new_sug_pkgs <- process_field(
+        desc$Suggests,
+        "Suggests",
+        add_to_graph = FALSE
       )
+      queue <- c(queue, new_sug_pkgs)
     }
   }
 
+  # Reachability filter: collect all packages reachable from target packages
+  reachable <- character(0L)
+  reach_q <- unique(packages)
+  while (length(reach_q) > 0L) {
+    node <- reach_q[1L]
+    reach_q <- reach_q[-1L]
+    if (node %in% reachable) {
+      next
+    }
+    reachable <- c(reachable, node)
+    children <- reach_graph[[node]]
+    reach_q <- c(reach_q, setdiff(children, reachable))
+  }
+
+  # Retain natural discovery ordering among reachable packages
+  active_nodes <- intersect(visited_order, reachable)
+
   # Topological Sort
-  sorted_order <- .topological_sort(names(visited), deps_graph)
+  sorted_order <- .topological_sort(active_nodes, deps_graph)
 
   # Assemble resolved dependencies output
   resolved_list <- list()
 
   for (p in sorted_order) {
-    pkg_info <- .find_and_read_desc(p, lib.loc = lib.loc, cache = desc_cache)
+    pkg_info <- selected_info[[p]]
+    desc <- pkg_info$desc
     installed_ver <- pkg_info$version
 
     # Calculate maximum required version constraint
