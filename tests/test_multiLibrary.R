@@ -745,4 +745,138 @@ local({
   )
 })
 
+# 14.4 S4 Generic & Class Definition in Imports, Method in Second Imports
+#
+#   [pkgS4App] (Target)
+#      │         │
+#  (Imports)  (Imports)
+#      │         │
+#      ▼         ▼
+#  pkgS4Method  pkgS4Generic (Defines S4Entity & generic entity_summary)
+#    (Implements setMethod("entity_summary", "S4Entity"))
+#
+local({
+  pkgS4Generic <- mock_package(
+    "pkgS4Generic",
+    imports = "methods",
+    code = c(
+      "setClass('S4Entity', slots = c(id = 'numeric', label = 'character'))",
+      "setGeneric('entity_summary', function(object) {",
+      "  standardGeneric('entity_summary')",
+      "})"
+    ),
+    exports = "entity_summary",
+    namespace_extra = c(
+      "import(methods)",
+      "exportClasses(S4Entity)",
+      "exportMethods(entity_summary)"
+    )
+  )
+
+  pkgS4Method <- mock_package(
+    "pkgS4Method",
+    imports = list("methods", pkgS4Generic),
+    code = c(
+      "setMethod('entity_summary', signature(object = 'S4Entity'),",
+      "  function(object) {",
+      "    paste0('S4Entity[', object@id, ':', object@label, ']')",
+      "  }",
+      ")",
+      "create_entity <- function(id, label) {",
+      "  new('S4Entity', id = id, label = label)",
+      "}"
+    ),
+    exports = "create_entity",
+    namespace_extra = c(
+      "import(methods)",
+      "import(pkgS4Generic)",
+      "exportMethods(entity_summary)"
+    )
+  )
+
+  pkgS4App <- mock_package(
+    "pkgS4App",
+    imports = list("methods", pkgS4Generic, pkgS4Method),
+    code = c(
+      "run_s4_test <- function() {",
+      "  e <- create_entity(101, 'MockItem')",
+      "  entity_summary(e)",
+      "}"
+    ),
+    exports = "run_s4_test",
+    namespace_extra = c(
+      "import(methods)",
+      "import(pkgS4Generic)",
+      "import(pkgS4Method)"
+    )
+  )
+
+  lib <- create_mock_library(pkgS4App, pkgS4Method, pkgS4Generic)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "S4 generic dispatch across imports must match Base R" =
+      compare_execution("pkgS4App", "run_s4_test()", lib),
+    "pkgS4App session state must match Base R" =
+      compare_to_base_r("pkgS4App", lib)
+  )
+})
+
+# 14.5 Reverse Target Order: Method Package Specified Before Generic Package
+#
+#   User requests: multiLibrary(pkgMethod, pkgGeneric)
+#
+#   [pkgMethod] (Target 1, listed first)
+#        │
+#    (Imports)
+#        │
+#        ▼
+#   [pkgGeneric] (Target 2, defines generic greet())
+#
+local({
+  pkgGeneric <- mock_package(
+    "pkgGeneric",
+    code = "greet <- function(x, ...) UseMethod('greet')",
+    exports = "greet"
+  )
+
+  pkgMethod <- mock_package(
+    "pkgMethod",
+    imports = list(pkgGeneric),
+    code = c(
+      "make_custom <- function() structure(list(), class = 'custom_type')",
+      "greet.custom_type <- function(x, ...) 'Dispatched greet.custom_type!'"
+    ),
+    exports = "make_custom",
+    namespace_extra = "S3method(greet, custom_type)"
+  )
+
+  lib <- create_mock_library(pkgMethod, pkgGeneric)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  # Verify topological resolution load_order
+  res <- resolve_dependencies(
+    c("pkgMethod", "pkgGeneric"),
+    lib.loc = lib$lib_dir
+  )
+  stopifnot(
+    "pkgGeneric must be assigned lower load_order than pkgMethod" =
+      res$pkgGeneric$load_order < res$pkgMethod$load_order
+  )
+
+  # Verify execution and session state parity
+  stopifnot(
+    "Reverse order (pkgMethod, pkgGeneric) execution matches Base R" =
+      compare_execution(
+        c("pkgMethod", "pkgGeneric"),
+        "greet(make_custom())",
+        lib
+      ),
+    "Reverse order (pkgMethod, pkgGeneric) session state matches Base R" =
+      compare_to_base_r(c("pkgMethod", "pkgGeneric"), lib),
+    "Forward order (pkgGeneric, pkgMethod) session state matches Base R" =
+      compare_to_base_r(c("pkgGeneric", "pkgMethod"), lib)
+  )
+})
+
 cat("All consolidated multiLibrary tests passed successfully!\n")
