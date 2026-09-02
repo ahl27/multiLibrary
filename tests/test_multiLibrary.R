@@ -879,4 +879,349 @@ local({
   )
 })
 
+# ==============================================================================
+# 15. Method Dispatch in .onLoad Hooks (onLoadS3, onLoadS4)
+# ==============================================================================
+#
+# 15.1 S3 Method Dispatch Executed Directly Inside Dependent's .onLoad()
+#
+#   [pkgS3Dependent] (Executes S3 method dispatch in .onLoad)
+#          │
+#      (Imports)
+#          │
+#          ▼
+#   [pkgS3Provider] (Defines generic audit_entity & S3method(audit_entity))
+#
+local({
+  pkgS3Provider <- mock_package(
+    "pkgS3Provider",
+    code = c(
+      "audit_entity <- function(x, ...) UseMethod('audit_entity')",
+      "audit_entity.AuditToken <- function(x, ...) {",
+      "  paste0('AUDIT_OK:', x$name)",
+      "}",
+      "make_token <- function(n) {",
+      "  structure(list(name = n), class = 'AuditToken')",
+      "}"
+    ),
+    exports = c("audit_entity", "make_token"),
+    namespace_extra = "S3method(audit_entity, AuditToken)"
+  )
+
+  pkgS3Dependent <- mock_package(
+    "pkgS3Dependent",
+    imports = list(pkgS3Provider),
+    code = c(
+      ".onLoad <- function(libname, pkgname) {",
+      "  tok <- make_token('onLoadS3')",
+      "  res <- audit_entity(tok)",
+      "  if (res != 'AUDIT_OK:onLoadS3') {",
+      "    stop('Failed S3 dispatch in .onLoad!')",
+      "  }",
+      "  options(on_load_s3_result = res)",
+      "}",
+      "get_on_load_s3_status <- function() {",
+      "  getOption('on_load_s3_result')",
+      "}"
+    ),
+    exports = "get_on_load_s3_status"
+  )
+
+  lib <- create_mock_library(pkgS3Dependent, pkgS3Provider)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "S3 method dispatch in .onLoad must execute and match Base R" =
+      compare_execution(
+        "pkgS3Dependent",
+        "get_on_load_s3_status()",
+        lib
+      ),
+    "pkgS3Dependent session state must match Base R" =
+      compare_to_base_r("pkgS3Dependent", lib)
+  )
+})
+
+# 15.2 S4 Method Dispatch Executed Directly Inside Dependent's .onLoad()
+#
+#   [pkgS4Dependent] (Executes S4 method dispatch in .onLoad)
+#          │
+#      (Imports)
+#          │
+#          ▼
+#   [pkgS4Provider] (Defines S4 class, generic, and S4 method)
+#
+local({
+  pkgS4Provider <- mock_package(
+    "pkgS4Provider",
+    imports = "methods",
+    code = c(
+      "setClass('S4ValToken', slots = c(code = 'numeric', name = 'character'))",
+      "setGeneric('eval_token', function(x) standardGeneric('eval_token'))",
+      "setMethod('eval_token', signature(x = 'S4ValToken'), function(x) {",
+      "  paste0('S4_OK:', x@name)",
+      "})",
+      "make_s4_token <- function(n) new('S4ValToken', code = 1, name = n)"
+    ),
+    exports = c("eval_token", "make_s4_token"),
+    namespace_extra = c(
+      "import(methods)",
+      "exportClasses(S4ValToken)",
+      "exportMethods(eval_token)"
+    )
+  )
+
+  pkgS4Dependent <- mock_package(
+    "pkgS4Dependent",
+    imports = list("methods", pkgS4Provider),
+    code = c(
+      ".onLoad <- function(libname, pkgname) {",
+      "  tok <- make_s4_token('onLoadS4')",
+      "  res <- eval_token(tok)",
+      "  if (res != 'S4_OK:onLoadS4') {",
+      "    stop('Failed S4 dispatch in .onLoad!')",
+      "  }",
+      "  options(on_load_s4_result = res)",
+      "}",
+      "get_on_load_s4_status <- function() {",
+      "  getOption('on_load_s4_result')",
+      "}"
+    ),
+    exports = "get_on_load_s4_status",
+    namespace_extra = c(
+      "import(methods)",
+      "import(pkgS4Provider)"
+    )
+  )
+
+  lib <- create_mock_library(pkgS4Dependent, pkgS4Provider)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "S4 method dispatch in .onLoad must execute and match Base R" =
+      compare_execution(
+        "pkgS4Dependent",
+        "get_on_load_s4_status()",
+        lib
+      ),
+    "pkgS4Dependent session state must match Base R" =
+      compare_to_base_r("pkgS4Dependent", lib)
+  )
+})
+
+# ==============================================================================
+# 16. Diamond Imports with Distinct S3 Methods
+# ==============================================================================
+#
+#        [pkgDiamondApp] (Target)
+#          /        \
+#     (Imports)   (Imports)
+#        /            \
+#   pkgBranch1     pkgBranch2
+#   (Method for    (Method for
+#    Class 1)       Class 2)
+#        \            /
+#     (Imports)   (Imports)
+#          \        /
+#        [pkgBaseGeneric] (Defines generic calc_metric())
+#
+local({
+  pkgBaseGeneric <- mock_package(
+    "pkgBaseGeneric",
+    code = "calc_metric <- function(x, ...) UseMethod('calc_metric')",
+    exports = "calc_metric"
+  )
+
+  pkgBranch1 <- mock_package(
+    "pkgBranch1",
+    imports = list(pkgBaseGeneric),
+    code = c(
+      "make_b1 <- function(v) structure(list(v = v), class = 'b1_class')",
+      "calc_metric.b1_class <- function(x, ...) x$v * 2"
+    ),
+    exports = "make_b1",
+    namespace_extra = "S3method(calc_metric, b1_class)"
+  )
+
+  pkgBranch2 <- mock_package(
+    "pkgBranch2",
+    imports = list(pkgBaseGeneric),
+    code = c(
+      "make_b2 <- function(v) structure(list(v = v), class = 'b2_class')",
+      "calc_metric.b2_class <- function(x, ...) x$v * 10"
+    ),
+    exports = "make_b2",
+    namespace_extra = "S3method(calc_metric, b2_class)"
+  )
+
+  pkgDiamondApp <- mock_package(
+    "pkgDiamondApp",
+    imports = list(pkgBaseGeneric, pkgBranch1, pkgBranch2),
+    code = c(
+      "run_diamond <- function() {",
+      "  paste(calc_metric(make_b1(5)), calc_metric(make_b2(5)))",
+      "}"
+    ),
+    exports = "run_diamond"
+  )
+
+  lib <- create_mock_library(
+    pkgDiamondApp,
+    pkgBranch1,
+    pkgBranch2,
+    pkgBaseGeneric
+  )
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Diamond import S3 method dispatch must execute and match Base R" =
+      compare_execution("pkgDiamondApp", "run_diamond()", lib),
+    "pkgDiamondApp session state must match Base R" =
+      compare_to_base_r("pkgDiamondApp", lib)
+  )
+})
+
+# ==============================================================================
+# 17. Re-Exported Functions / Namespace Aliasing
+# ==============================================================================
+#
+#   [pkgConsumer] -> [pkgFacade] (re-exports) -> [pkgEngine]
+#
+local({
+  pkgEngine <- mock_package(
+    "pkgEngine",
+    code = "engine_core <- function(x) x^2",
+    exports = "engine_core"
+  )
+
+  pkgFacade <- mock_package(
+    "pkgFacade",
+    imports = list(pkgEngine),
+    code = "engine_core <- pkgEngine::engine_core",
+    exports = "engine_core"
+  )
+
+  pkgConsumer <- mock_package(
+    "pkgConsumer",
+    imports = list(pkgFacade),
+    code = "run_facade <- function() pkgFacade::engine_core(7)",
+    exports = "run_facade"
+  )
+
+  lib <- create_mock_library(pkgConsumer, pkgFacade, pkgEngine)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Re-exported symbol invocation must execute and match Base R" =
+      compare_execution("pkgConsumer", "run_facade()", lib),
+    "pkgConsumer session state must match Base R" =
+      compare_to_base_r("pkgConsumer", lib)
+  )
+})
+
+# ==============================================================================
+# 18. S3 Method Overwriting Precedence Across Target Orders
+# ==============================================================================
+#
+#   pkgM1 and pkgM2 both implement S3 method for the SAME generic & class.
+#   Whichever target is loaded second must overwrite the previous method.
+#
+local({
+  pkgGen <- mock_package(
+    "pkgGen",
+    code = "compute <- function(x, ...) UseMethod('compute')",
+    exports = "compute"
+  )
+
+  pkgM1 <- mock_package(
+    "pkgM1",
+    imports = list(pkgGen),
+    code = c(
+      "make_item <- function() structure(list(), class = 'item_class')",
+      "compute.item_class <- function(x, ...) 'M1_METHOD'"
+    ),
+    exports = "make_item",
+    namespace_extra = "S3method(compute, item_class)"
+  )
+
+  pkgM2 <- mock_package(
+    "pkgM2",
+    imports = list(pkgGen),
+    code = "compute.item_class <- function(x, ...) 'M2_METHOD'",
+    exports = character(0L),
+    namespace_extra = "S3method(compute, item_class)"
+  )
+
+  lib <- create_mock_library(pkgM1, pkgM2, pkgGen)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Order (pkgM1, pkgM2) method overwrite must match Base R" =
+      compare_execution(
+        c("pkgM1", "pkgM2"),
+        "pkgGen::compute(make_item())",
+        lib
+      ),
+    "Order (pkgM2, pkgM1) method overwrite must match Base R" =
+      compare_execution(
+        c("pkgM2", "pkgM1"),
+        "pkgGen::compute(make_item())",
+        lib
+      )
+  )
+})
+
+# ==============================================================================
+# 19. Imports Declaration Order Fidelity (Sibling Tie-Breaking)
+# ==============================================================================
+#
+#   [pkgApp] lists Imports: pkgZ, pkgA (in that exact declaration order)
+#
+#   Base R evaluates Imports left-to-right (pkgZ then pkgA).
+#   If both pkgZ and pkgA implement the same S3 method for a generic in pkgGen,
+#   pkgA must overwrite pkgZ in Base R.
+#   multiLibrary must preserve this exact declaration sequence.
+#
+local({
+  pkgGen <- mock_package(
+    "pkgGen",
+    code = "greet <- function(x, ...) UseMethod('greet')",
+    exports = "greet"
+  )
+
+  pkgZ <- mock_package(
+    "pkgZ",
+    imports = list(pkgGen),
+    code = c(
+      "make_item <- function() structure(list(), class = 'item_class')",
+      "greet.item_class <- function(x, ...) 'Z_METHOD'"
+    ),
+    exports = "make_item",
+    namespace_extra = "S3method(greet, item_class)"
+  )
+
+  pkgA <- mock_package(
+    "pkgA",
+    imports = list(pkgGen),
+    code = "greet.item_class <- function(x, ...) 'A_METHOD'",
+    exports = character(0L),
+    namespace_extra = "S3method(greet, item_class)"
+  )
+
+  pkgApp <- mock_package(
+    "pkgApp",
+    imports = list(pkgZ, pkgA, pkgGen),
+    code = "run_app <- function() greet(make_item())",
+    exports = "run_app"
+  )
+
+  lib <- create_mock_library(pkgApp, pkgZ, pkgA, pkgGen)
+  on.exit(lib$cleanup(), add = TRUE)
+
+  stopifnot(
+    "Imports declaration order (pkgZ, pkgA) execution must match Base R" =
+      compare_execution("pkgApp", "run_app()", lib)
+  )
+})
+
 cat("All consolidated multiLibrary tests passed successfully!\n")
