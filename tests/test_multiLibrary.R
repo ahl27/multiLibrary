@@ -1,5 +1,5 @@
 # ==============================================================================
-# Comprehensive Test Suite for multiLibrary
+# Tests for multiLibrary
 # ==============================================================================
 #
 # Tests dependency graph traversal, version reconciliation, topological
