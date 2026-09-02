@@ -1,0 +1,19 @@
+Package: multiLibrary
+Type: Package
+Title: Multi-Package Dependency Resolution and Loading for R
+Version: 0.1.0
+Authors@R: person("Aidan", "Lakshman",
+                  email = "ahl27@pitt.edu",
+                  role = c("aut", "cre"))
+Description: Resolves multi-package dependencies simultaneously, finding
+    maximum version constraints across all requested packages, checking
+    installed libraries, and determining safe loading order.
+License: GPL-3
+Encoding: UTF-8
+RoxygenNote: 7.3.1
+Imports:
+    tools,
+    utils
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

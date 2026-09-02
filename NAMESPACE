@@ -1,0 +1,7 @@
+import(tools)
+import(utils)
+
+export(resolve_dependencies)
+export(multiLibrary)
+
+S3method(print, resolved_dependencies)
