@@ -110,7 +110,8 @@
       break
     }
 
-    zero_deg <- sort(zero_deg)
+    # Preserve original discovery sequence from nodes for tie-breaking
+    zero_deg <- intersect(nodes, zero_deg)
     sorted_order <- c(sorted_order, zero_deg)
 
     temp_in_degree[zero_deg] <- NULL
